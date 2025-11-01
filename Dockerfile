@@ -1,58 +1,33 @@
-FROM debian:bookworm AS ffmpeg
+FROM python:3.11-slim AS builder
+WORKDIR /app
 
-COPY sources.list /
-RUN cat /sources.list >> /etc/apt/sources.list
+COPY .python-version pyproject.toml uv.lock ./
+COPY src src
+ENV UV_HTTP_TIMEOUT=300 \
+    UV_LINK_MODE=copy
+RUN pip install uv && uv sync -v --frozen --no-install-project
 
-RUN export DEBIAN_FRONTEND=noninteractive \
-    && apt-get -qq update \
-    && apt-get -qq install --no-install-recommends \
-    build-essential \
-    git \
-    pkg-config \
-    yasm \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+FROM python:3.11-slim AS production
 
-RUN git clone https://github.com/FFmpeg/FFmpeg.git --depth 1 --branch n6.1.1 --single-branch /FFmpeg-6.1.1    
+LABEL org.opencontainers.image.authors="Pengxuan Men <pengxuan.men@gmail.com>" maintainer="Pengxuan Men <pengxuan.men@gmail.com>"
 
-WORKDIR /FFmpeg-6.1.1
-
-RUN PATH="$HOME/bin:$PATH" PKG_CONFIG_PATH="$HOME/ffmpeg_build/lib/pkgconfig" ./configure \
-      --prefix="$HOME/ffmpeg_build" \
-      --pkg-config-flags="--static" \
-      --extra-cflags="-I$HOME/ffmpeg_build/include" \
-      --extra-ldflags="-L$HOME/ffmpeg_build/lib" \
-      --extra-libs="-lpthread -lm" \
-      --ld="g++" \
-      --bindir="$HOME/bin" \
-      --disable-doc \
-      --disable-htmlpages \
-      --disable-podpages \
-      --disable-txtpages \
-      --disable-network \
-      --disable-autodetect \
-      --disable-hwaccels \
-      --disable-ffprobe \
-      --disable-ffplay \
-      --enable-filter=copy \
-      --enable-protocol=file \
-      --enable-small && \
-    PATH="$HOME/bin:$PATH" make -j$(nproc) && \
-    make install && \
-    hash -r
-
-FROM python:3.9-slim
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY requirements.txt .
-COPY main.py .
-COPY --from=ffmpeg /FFmpeg-6.1.1 /FFmpeg-6.1.1
-COPY --from=ffmpeg /root/bin/ffmpeg /usr/local/bin/ffmpeg
+VOLUME /app/logs
+EXPOSE 9991
 
-RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
-RUN pip install --upgrade pip
-RUN pip install torch>=1.11.0 torchaudio --index-url https://download.pytorch.org/whl/cpu
-RUN pip install -r requirements.txt
+COPY --from=builder /app/.venv .venv
+COPY --from=builder /app/src src
+COPY --from=mwader/static-ffmpeg:6.1.1 /ffmpeg /usr/local/bin/
 
-CMD ["python", "main.py"]
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+CMD ["python", "-m", "src.main"]
+HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
+  CMD curl -sf http://localhost:${PORT:-9991}/health | grep -qv '"DOWN"'

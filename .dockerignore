@@ -1,0 +1,6 @@
+logs/
+/tests/
+/docs/
+/models/
+.venv
+.cache
